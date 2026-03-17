@@ -1,7 +1,0 @@
-deployment:
-  tasks:
-    - export DEPLOYPATH=/home/mediama2/public_html/crm_project
-    - rsync -av --delete \
-        --exclude='.git*' \
-        --exclude='db.sqlite3' \
-        ./ $DEPLOYPATH
