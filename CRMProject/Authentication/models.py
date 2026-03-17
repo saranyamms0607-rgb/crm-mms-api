@@ -7,9 +7,11 @@ from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseU
 
 class LoginRole(models.Model):
     ROLE_CHOICES = (
+        ('SUPERADMIN', 'Superadmin'),
         ('ADMIN', 'Admin'),
         ('SUPERVISOR', 'Supervisor'),
         ('AGENT', 'Agent'),
+        ('CLIENT', 'Client'),
     )
 
     name = models.CharField(max_length=20, choices=ROLE_CHOICES, unique=True)
@@ -24,14 +26,14 @@ class LoginUserManager(BaseUserManager):
         if not email:
             raise ValueError("Email is required")
 
-        # 🔑 Extract role BEFORE creating user
+        #  Extract role BEFORE creating user
         role_value = extra_fields.pop("role", None)
 
         email = self.normalize_email(email)
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
 
-        # 🔐 Assign role correctly
+        #  Assign role correctly
         if role_value:
             if isinstance(role_value, LoginRole):
                 user.role = role_value
@@ -47,27 +49,16 @@ class LoginUserManager(BaseUserManager):
         extra_fields.setdefault("is_active", True)
 
         if not extra_fields.get("role"):
-            extra_fields["role"] = LoginRole.objects.get(name="ADMIN")
+            extra_fields["role"] = LoginRole.objects.get(name="SUPERADMIN")
 
         return self.create_user(email, password, **extra_fields)
-BRANCH_CHOICES= [
-        ("hopes", "Hopes"),
-        ("bangalore", "Bangalore"),
-        ("palampur", "Palampur"),
-        ("shivamogga", "Shivamogga"),
-    ]
+
 class LoginUser(AbstractBaseUser, PermissionsMixin):
+    asc_code = models.CharField(max_length=255)
+    asc_name = models.CharField(max_length=255)
+    asc_location = models.CharField(max_length=255)
     email = models.EmailField(unique=True)
     phone_no =models.CharField(max_length=10)
-    title = models.CharField(max_length=3)
-    initial = models.CharField(max_length=3)
-    first_name = models.CharField(max_length=150)
-    last_name = models.CharField(max_length=150, blank=True)
-    branch = models.CharField(
-        max_length=20,
-        choices=BRANCH_CHOICES,
-        default="hopes"
-    )
     password = models.CharField(max_length=255)
     role = models.ForeignKey(LoginRole, on_delete=models.PROTECT,null=True)
     is_active = models.BooleanField(default=True)
@@ -86,14 +77,11 @@ class LoginUser(AbstractBaseUser, PermissionsMixin):
     reset_token_expiry = models.DateTimeField(null=True, blank=True)
 
     USERNAME_FIELD = 'email'
-    REQUIRED_FIELDS = ['first_name', 'title', 'role']
-
-    
-    def get_full_name(self):
-        return f"{self.title} {self.first_name} {self.last_name}".strip()
+    REQUIRED_FIELDS = ['asc_code', 'asc_name', 'asc_location', 'role']
 
 
-    # 🔑 Reset token
+
+    #  Reset token
     def generate_reset_token(self):
         self.reset_token = uuid.uuid4().hex
         self.reset_token_expiry = timezone.now() + timedelta(minutes=15)

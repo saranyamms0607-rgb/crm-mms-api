@@ -2,13 +2,14 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 from datetime import timedelta
 from configurations.models import Lead
+from crmapp.views import VOICEMAIL_LIKE_STATUSES
 
 class Command(BaseCommand):
     help = "Auto-update lead buckets based on phone status and last contact"
 
     def handle(self, *args, **kwargs):
         now = timezone.now()
-        leads = Lead.objects.filter(is_active=True, status__in=["assigned","second_attempt","third_attempt"])
+        leads = Lead.objects.filter(is_active=True, status__in=["assigned", "second-attempt", "third-attempt"])
 
         for lead in leads:
             if not lead.status_updated_at:
@@ -22,22 +23,35 @@ class Command(BaseCommand):
             # Priority-based rules
             if "dnd" in statuses:
                 lead.status = "dnd"
-            elif "not_interested" in statuses:
-                lead.status = "deal_lost"
-            elif "prospect" in statuses:
-                lead.status  = "prospect"    
-            elif "interested" in statuses:
-                lead.status = "deal_won"
-            elif "callback" in statuses:
+            elif "not-interested" in statuses:
+                lead.status = "sale-lost"
+            elif "interested" in statuses or "prospect" in statuses:
+                lead.status = "prospect"
+            elif "callback" in statuses or "followup" in statuses:
                 lead.status = "followup"
-            elif all(s=="not_connected" for s in statuses):
-                # Increment attempts based on elapsed time
-                if lead.status == "assigned" and elapsed >= timedelta(hours=24):
-                    lead.status = "second_attempt"
-                elif lead.status == "second_attempt" and elapsed >= timedelta(hours=48):
-                    lead.status = "third_attempt"
-                elif lead.status == "third_attempt" and elapsed >= timedelta(hours=72):
-                    lead.status = "completed"
+            elif all(s in VOICEMAIL_LIKE_STATUSES for s in statuses):
+                # Increment attempts based on elapsed time (24h rule)
+                tracking = lead.status_tracking or {}
+                voicemail_count = tracking.get("voicemail_count", 0)
 
-            lead.save(update_fields=["status"])
+                # Fallback for missing tracking
+                if voicemail_count == 0:
+                    if lead.status == "second-attempt": voicemail_count = 1
+                    elif lead.status == "third-attempt": voicemail_count = 2
+
+                if elapsed >= timedelta(hours=24):
+                    if voicemail_count == 0:
+                        lead.status = "second-attempt"
+                        tracking["voicemail_count"] = 1
+                    elif voicemail_count == 1:
+                        lead.status = "third-attempt"
+                        tracking["voicemail_count"] = 2
+                    elif voicemail_count >= 2:
+                        lead.status = "completed"
+                        tracking["voicemail_count"] = 3
+                    
+                    lead.status_tracking = tracking
+                    lead.status_updated_at = now
+
+            lead.save()
             self.stdout.write(f"Lead {lead.id} updated to {lead.status}")

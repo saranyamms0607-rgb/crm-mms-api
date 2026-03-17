@@ -24,6 +24,8 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from .authentication import LoginUserJWTAuthentication
 
+from django.conf import settings 
+frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
 class MyProtectedView(APIView):
     authentication_classes = [LoginUserJWTAuthentication]
     permission_classes = [IsAuthenticated]
@@ -32,7 +34,7 @@ class MyProtectedView(APIView):
         user = request.user  # This is now a LoginUser instance
         return Response({
             "email": user.email,
-            "name": f"{user.title} {user.first_name} {user.last_name}",
+            "name": user.asc_name,
             "role": user.role.name
         },status=status.HTTP_200_OK)
 
@@ -41,7 +43,7 @@ class MyProtectedView(APIView):
 class LoginView(View):
 
     def post(self, request):
-        print("LOGIN API HIT")
+       
 
         try:
             data = json.loads(request.body)
@@ -57,14 +59,37 @@ class LoginView(View):
                     content_type="application/json",
                     status=status.HTTP_400_BAD_REQUEST
                 )
-                
 
-            user = LoginUser.objects.select_related("role").get(
-                email=email,
-                is_active=True
-            )
-            print("USER FOUND:", user)
-            print(password)
+            # Search across all three databases sequentially
+            databases = ['default', 'domestic', 'international']
+            user = None
+            found_in_db = None
+
+            for db in databases:
+                try:
+                    user_qs = LoginUser.objects.using(db).select_related("role").filter(
+                        email=email,
+                        is_active=True
+                    )
+                    if user_qs.exists():
+                        user = user_qs.first()
+                        found_in_db = db
+                        break
+                except Exception:
+                    continue
+
+            if not user:
+                logger.warning(f"Login failed: User {email} not found in any database")
+                return HttpResponse(
+                    json.dumps({
+                        "status": "fail",
+                        "message": "User not found"
+                    }),
+                    content_type="application/json",
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+        
 
             if not user.check_password(password):
                 return HttpResponse(
@@ -77,12 +102,21 @@ class LoginView(View):
                 )
 
             refresh = RefreshToken.for_user(user)
+            user_data={
+                "user_id": user.id,
+                "email": user.email,
+                "role": user.role.name,
+                "asc_name": user.asc_name,
+                "asc_code": user.asc_code,
+                "asc_location": user.asc_location,
+                "db_silo": found_in_db # Tell the frontend which DB to use for future requests
+            }
 
             return HttpResponse(
                 json.dumps({
                     "status": "success",
                     "message": "Login successful",
-                    "role": user.role.name,
+                    "data": user_data,
                     "access": str(refresh.access_token),
                     "refresh": str(refresh),
                     "expires_in": int(refresh.access_token.lifetime.total_seconds()),
@@ -90,19 +124,6 @@ class LoginView(View):
                 content_type="application/json",
                 status=status.HTTP_200_OK
             )
-
-
-        except LoginUser.DoesNotExist:
-            logger.warning("Login failed: Not Found",)
-
-            return HttpResponse(
-                    json.dumps({
-                        "status": "fail",
-                        "message": "User not found"
-                    }),
-                    content_type="application/json",
-                    status=status.HTTP_404_NOT_FOUND
-                )
 
         except json.JSONDecodeError:
            
@@ -150,14 +171,38 @@ class ForgotPasswordView(View):
             data = json.loads(request.body)
             email = data.get("email")
 
-            user = LoginUser.objects.get(email=email, is_active=True)
+            # Search across all three databases
+            databases = ['default', 'domestic', 'international']
+            user = None
+            found_in_db = None
+
+            for db in databases:
+                try:
+                    user_qs = LoginUser.objects.using(db).filter(email=email, is_active=True)
+                    if user_qs.exists():
+                        user = user_qs.first()
+                        found_in_db = db
+                        break
+                except Exception:
+                    continue
+
+            if not user:
+                return HttpResponse(
+                    json.dumps({
+                        "status": "fail",
+                        "message": "Email not registered"
+                    }),
+                    content_type="application/json",
+                    status=status.HTTP_404_NOT_FOUND
+                )
 
             token = str(uuid.uuid4())
             user.reset_token = token
             user.reset_token_expiry = timezone.now() + timedelta(minutes=15)
-            user.save()
+            # Save to the specific database where the user was found
+            user.save(using=found_in_db)
 
-            reset_link = f"http://localhost:5173/reset-password/{token}"
+            reset_link = f"{frontend_url}/reset-password/{token}"
 
             send_mail(
                 "Reset Your Password",
@@ -176,14 +221,11 @@ class ForgotPasswordView(View):
                 status=status.HTTP_200_OK
             )
 
-        except LoginUser.DoesNotExist:
+        except Exception as e:
             return HttpResponse(
-                json.dumps({
-                    "status": "fail",
-                    "message": "Email not registered"
-                }),
+                json.dumps({"status": "error", "message": str(e)}),
                 content_type="application/json",
-                status=status.HTTP_404_NOT_FOUND
+                status=500
             )
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -194,20 +236,38 @@ class ResetPasswordView(View):
             data = json.loads(request.body)
             new_password = data.get("password")
 
-            user = LoginUser.objects.get(
-                reset_token=token,
-                reset_token_expiry__gte=timezone.now()
-            )
-            if user.reset_token_expiry and user.reset_token_expiry < timezone.now():
+            # Search across all databases for the user with this token
+            databases = ['default', 'domestic', 'international']
+            user = None
+            found_in_db = None
+
+            for db in databases:
+                try:
+                    user_qs = LoginUser.objects.using(db).filter(
+                        reset_token=token,
+                        reset_token_expiry__gte=timezone.now()
+                    )
+                    if user_qs.exists():
+                        user = user_qs.first()
+                        found_in_db = db
+                        break
+                except Exception:
+                    continue
+
+            if not user:
                 return HttpResponse(
-                    json.dumps({"message": "Reset link expired"}),
+                    json.dumps({
+                        "status": "fail",
+                        "message": "Invalid or expired token"
+                    }),
                     content_type="application/json",
                     status=status.HTTP_400_BAD_REQUEST
                 )
+
             user.set_password(new_password)
             user.reset_token = None
             user.reset_token_expiry = None
-            user.save()
+            user.save(using=found_in_db)
 
             return HttpResponse(
                 json.dumps({
@@ -218,14 +278,11 @@ class ResetPasswordView(View):
                 status=status.HTTP_200_OK
             )
 
-        except LoginUser.DoesNotExist:
+        except Exception as e:
             return HttpResponse(
-                json.dumps({
-                    "status": "fail",
-                    "message": "Invalid or expired token"
-                }),
+                json.dumps({"status": "error", "message": str(e)}),
                 content_type="application/json",
-                status=status.HTTP_400_BAD_REQUEST
+                status=500
             )
 
 
@@ -243,17 +300,16 @@ class UserDropdownView(GenericAPIView):
         if search:
             users = users.filter(
                 Q(email__icontains=search) |
-                Q(first_name__icontains=search) |
-                Q(last_name__icontains=search)
+                Q(asc_name__icontains=search) 
             )
 
-        users = users.order_by("first_name")[:limit]
+        users = users.order_by("asc_name")[:limit]
 
         data = [
             {
                 "id": user.id,
                 "email": user.email,
-                "name": f"{user.title} {user.first_name} {user.last_name}"
+                "name": user.asc_name,
             }
             for user in users
         ]
